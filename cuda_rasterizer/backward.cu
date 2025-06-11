@@ -140,28 +140,31 @@ __device__ void computeColorFromSH(int idx, int deg, int max_coeffs, const glm::
 
 
 // Backward version of the rendering procedure.
-template <uint32_t C>
+template <uint32_t C, uint32_t S_MAX>
 __global__ void __launch_bounds__(BLOCK_X * BLOCK_Y)
 renderCUDA(
 	const uint2* __restrict__ ranges,
 	const uint32_t* __restrict__ point_list,
-	int W, int H,
+	int W, int H, int S,
 	float focal_x, float focal_y,
 	const float* __restrict__ bg_color,
 	const float2* __restrict__ points_xy_image,
 	const float4* __restrict__ normal_opacity,
 	const float* __restrict__ transMats,
 	const float* __restrict__ colors,
+	const float* __restrict__ semantics,
 	const float* __restrict__ depths,
 	const float* __restrict__ final_Ts,
 	const uint32_t* __restrict__ n_contrib,
 	const float* __restrict__ dL_dpixels,
+	const float* __restrict__ dL_dpixel_semantics,
 	const float* __restrict__ dL_depths,
 	float * __restrict__ dL_dtransMat,
 	float3* __restrict__ dL_dmean2D,
 	float* __restrict__ dL_dnormal3D,
 	float* __restrict__ dL_dopacity,
-	float* __restrict__ dL_dcolors)
+	float* __restrict__ dL_dcolors,
+	float* __restrict__ dL_dsemantics)
 {
 	// We rasterize again. Compute necessary block info.
 	auto block = cg::this_thread_block();
@@ -187,6 +190,7 @@ renderCUDA(
 	__shared__ float3 collected_Tu[BLOCK_SIZE];
 	__shared__ float3 collected_Tv[BLOCK_SIZE];
 	__shared__ float3 collected_Tw[BLOCK_SIZE];
+	__shared__ float collected_semantics[S_MAX * BLOCK_SIZE];
 	// __shared__ float collected_depths[BLOCK_SIZE];
 
 	// In the forward, we stored the final value for T, the
@@ -201,6 +205,7 @@ renderCUDA(
 
 	float accum_rec[C] = { 0 };
 	float dL_dpixel[C];
+	float dL_dpixel_semantic[S_MAX];
 
 #if RENDER_AXUTILITY
 	float dL_dreg;
@@ -238,10 +243,16 @@ renderCUDA(
 	if (inside){
 		for (int i = 0; i < C; i++)
 			dL_dpixel[i] = dL_dpixels[i * H * W + pix_id];
+		if(dL_dpixel_semantics){
+			for (int i = 0; i < S; i++)
+				dL_dpixel_semantic[i] = dL_dpixel_semantics[i * H * W + pix_id];
+		}
 	}
 
 	float last_alpha = 0;
 	float last_color[C] = { 0 };
+	float accum_semantic_rec[S_MAX] = { 0 };
+	float last_semantic[S_MAX]= { 0 };
 
 	// Gradient of pixel coordinate w.r.t. normalized 
 	// screen-space viewport corrdinates (-1 to 1)
@@ -267,6 +278,10 @@ renderCUDA(
 			for (int i = 0; i < C; i++)
 				collected_colors[i * BLOCK_SIZE + block.thread_rank()] = colors[coll_id * C + i];
 				// collected_depths[block.thread_rank()] = depths[coll_id];
+			if(semantics){
+				for (int i = 0; i < S; i++)
+					collected_semantics[i * BLOCK_SIZE + block.thread_rank()] = semantics[coll_id * S + i];
+			}
 		}
 		block.sync();
 
@@ -337,6 +352,21 @@ renderCUDA(
 				// Atomic, since this pixel is just one of potentially
 				// many that were affected by this Gaussian.
 				atomicAdd(&(dL_dcolors[global_id * C + ch]), dchannel_dcolor * dL_dchannel);
+			}
+			// Propagate gradients from pixel semantic to opacity
+			if(semantics){
+				const float dchannel_dsemantic = alpha * T;
+				for (int ch = 0; ch < S; ch++)
+				{
+					const float s = collected_semantics[ch * BLOCK_SIZE + j];
+					accum_semantic_rec[ch] = last_alpha * last_semantic[ch] + (1.f - last_alpha) * accum_semantic_rec[ch];
+					last_semantic[ch] = s;
+
+					const float dL_dchannel = dL_dpixel_semantic[ch];
+					dL_dalpha += (s - accum_semantic_rec[ch]) * dL_dchannel;
+
+					atomicAdd(&(dL_dsemantics[global_id * S + ch]), dchannel_dsemantic * dL_dchannel);
+				}
 			}
 
 			float dL_dz = 0.0f;
@@ -692,43 +722,49 @@ void BACKWARD::render(
 	const dim3 grid, const dim3 block,
 	const uint2* ranges,
 	const uint32_t* point_list,
-	int W, int H,
+	int W, int H, int S,
 	float focal_x, float focal_y,
 	const float* bg_color,
 	const float2* means2D,
 	const float4* normal_opacity,
 	const float* colors,
+	const float* semantics,
 	const float* transMats,
 	const float* depths,
 	const float* final_Ts,
 	const uint32_t* n_contrib,
 	const float* dL_dpixels,
+	const float* dL_dpixel_semantics,
 	const float* dL_depths,
 	float * dL_dtransMat,
 	float3* dL_dmean2D,
 	float* dL_dnormal3D,
 	float* dL_dopacity,
-	float* dL_dcolors)
+	float* dL_dcolors,
+	float* dL_dsemantics)
 {
-	renderCUDA<NUM_CHANNELS> << <grid, block >> >(
+	renderCUDA<NUM_CHANNELS, NUM_CLASSES> << <grid, block >> >(
 		ranges,
 		point_list,
-		W, H,
+		W, H, S,
 		focal_x, focal_y,
 		bg_color,
 		means2D,
 		normal_opacity,
 		transMats,
 		colors,
+		semantics,
 		depths,
 		final_Ts,
 		n_contrib,
 		dL_dpixels,
+		dL_dpixel_semantics,
 		dL_depths,
 		dL_dtransMat,
 		dL_dmean2D,
 		dL_dnormal3D,
 		dL_dopacity,
-		dL_dcolors
+		dL_dcolors,
+		dL_dsemantics
 		);
 }

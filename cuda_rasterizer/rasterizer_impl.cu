@@ -199,12 +199,13 @@ int CudaRasterizer::Rasterizer::forward(
 	std::function<char* (size_t)> geometryBuffer,
 	std::function<char* (size_t)> binningBuffer,
 	std::function<char* (size_t)> imageBuffer,
-	const int P, int D, int M,
+	const int P, int D, int M, int S,
 	const float* background,
 	const int width, int height,
 	const float* means3D,
 	const float* shs,
 	const float* colors_precomp,
+	const float* semantics,
 	const float* opacities,
 	const float* scales,
 	const float scale_modifier,
@@ -216,6 +217,7 @@ int CudaRasterizer::Rasterizer::forward(
 	const float tan_fovx, float tan_fovy,
 	const bool prefiltered,
 	float* out_color,
+	float* out_semantic,
 	float* out_others,
 	int* radii,
 	bool debug)
@@ -325,10 +327,11 @@ int CudaRasterizer::Rasterizer::forward(
 		tile_grid, block,
 		imgState.ranges,
 		binningState.point_list,
-		width, height,
+		width, height, S,
 		focal_x, focal_y,
 		geomState.means2D,
 		feature_ptr,
+		semantics,
 		transMat_ptr,
 		geomState.depths,
 		geomState.normal_opacity,
@@ -336,6 +339,7 @@ int CudaRasterizer::Rasterizer::forward(
 		imgState.n_contrib,
 		background,
 		out_color,
+		out_semantic,
 		out_others), debug)
 
 	return num_rendered;
@@ -344,12 +348,13 @@ int CudaRasterizer::Rasterizer::forward(
 // Produce necessary gradients for optimization, corresponding
 // to forward render pass
 void CudaRasterizer::Rasterizer::backward(
-	const int P, int D, int M, int R,
+	const int P, int D, int M, int R, int S,
 	const float* background,
 	const int width, int height,
 	const float* means3D,
 	const float* shs,
 	const float* colors_precomp,
+	const float* semantics,
 	const float* scales,
 	const float scale_modifier,
 	const float* rotations,
@@ -363,6 +368,7 @@ void CudaRasterizer::Rasterizer::backward(
 	char* binning_buffer,
 	char* img_buffer,
 	const float* dL_dpix,
+	const float* dL_dpix_semantic,
 	const float* dL_depths,
 	float* dL_dmean2D,
 	float* dL_dnormal,
@@ -373,6 +379,7 @@ void CudaRasterizer::Rasterizer::backward(
 	float* dL_dsh,
 	float* dL_dscale,
 	float* dL_drot,
+	float* dL_dsemantic,
 	bool debug)
 {
 	GeometryState geomState = GeometryState::fromChunk(geom_buffer, P);
@@ -401,23 +408,26 @@ void CudaRasterizer::Rasterizer::backward(
 		block,
 		imgState.ranges,
 		binningState.point_list,
-		width, height,
+		width, height, S,
 		focal_x, focal_y,
 		background,
 		geomState.means2D,
 		geomState.normal_opacity,
 		color_ptr,
+		semantics,
 		transMat_ptr,
 		depth_ptr,
 		imgState.accum_alpha,
 		imgState.n_contrib,
 		dL_dpix,
+		dL_dpix_semantic,
 		dL_depths,
 		dL_dtransMat,
 		(float3*)dL_dmean2D,
 		dL_dnormal,
 		dL_dopacity,
-		dL_dcolor), debug)
+		dL_dcolor,
+		dL_dsemantic), debug)
 
 	// Take care of the rest of preprocessing. Was the precomputed covariance
 	// given to us or a scales/rot pair? If precomputed, pass that. If not,

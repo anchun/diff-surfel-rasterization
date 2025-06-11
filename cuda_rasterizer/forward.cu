@@ -258,10 +258,11 @@ __global__ void __launch_bounds__(BLOCK_X * BLOCK_Y)
 renderCUDA(
 	const uint2* __restrict__ ranges,
 	const uint32_t* __restrict__ point_list,
-	int W, int H,
+	int W, int H, int S,
 	float focal_x, float focal_y,
 	const float2* __restrict__ points_xy_image,
 	const float* __restrict__ features,
+	const float* __restrict__ semantics,
 	const float* __restrict__ transMats,
 	const float* __restrict__ depths,
 	const float4* __restrict__ normal_opacity,
@@ -269,6 +270,7 @@ renderCUDA(
 	uint32_t* __restrict__ n_contrib,
 	const float* __restrict__ bg_color,
 	float* __restrict__ out_color,
+	float* __restrict__ out_semantic,
 	float* __restrict__ out_others)
 {
 	// Identify current tile and associated min/max pixel range.
@@ -416,6 +418,11 @@ renderCUDA(
 			// Eq. (3) from 3D Gaussian splatting paper.
 			for (int ch = 0; ch < CHANNELS; ch++)
 				C[ch] += features[collected_id[j] * CHANNELS + ch] * w;
+			if(semantics && out_semantic){
+				for (int ch = 0; ch < S; ch++){
+					out_semantic[ch * H * W + pix_id] += semantics[collected_id[j] * S + ch] * w;
+				}
+			}
 			T = test_T;
 
 			// Keep track of last range entry to update this
@@ -451,10 +458,11 @@ void FORWARD::render(
 	const dim3 grid, dim3 block,
 	const uint2* ranges,
 	const uint32_t* point_list,
-	int W, int H,
+	int W, int H, int S,
 	float focal_x, float focal_y,
 	const float2* means2D,
 	const float* colors,
+	const float* semantics,
 	const float* transMats,
 	const float* depths,
 	const float4* normal_opacity,
@@ -462,15 +470,17 @@ void FORWARD::render(
 	uint32_t* n_contrib,
 	const float* bg_color,
 	float* out_color,
+	float* out_semantic,
 	float* out_others)
 {
 	renderCUDA<NUM_CHANNELS> << <grid, block >> > (
 		ranges,
 		point_list,
-		W, H,
+		W, H, S,
 		focal_x, focal_y,
 		means2D,
 		colors,
+		semantics,
 		transMats,
 		depths,
 		normal_opacity,
@@ -478,6 +488,7 @@ void FORWARD::render(
 		n_contrib,
 		bg_color,
 		out_color,
+		out_semantic,
 		out_others);
 }
 
